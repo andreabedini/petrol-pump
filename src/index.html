@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <title>
+    <%= htmlWebpackPlugin.options.title %>
+  </title>
+  <link rel="stylesheet" href="https://unpkg.com/tachyons@4.10.0/css/tachyons.min.css" />
+</head>
+
+<body class="w-100 sans-serif bg-white pt5 ph3">
+  <div class="flex">
+    <div class="flex flex-column items-center">
+      <span id="presetLCD" class="f6 br3 ba ph3 pv2 mb2 black">000</span>
+      <div id="keypad" class="flex flex-column ma3">
+        <div class="flex">
+          <input id="keypad1" class="w-33 pa2" type="button" value="1">
+          <input id="keypad2" class="w-33 pa2" type="button" value="2">
+          <input id="keypad3" class="w-33 pa2" type="button" value="3">
+        </div>
+        <div class="flex">
+          <input id="keypad4" class="w-33 pa2" type="button" value="4">
+          <input id="keypad5" class="w-33 pa2" type="button" value="5">
+          <input id="keypad6" class="w-33 pa2" type="button" value="6">
+        </div>
+        <div class="flex">
+          <input id="keypad7" class="w-33 pa2" type="button" value="7">
+          <input id="keypad8" class="w-33 pa2" type="button" value="8">
+          <input id="keypad9" class="w-33 pa2" type="button" value="9">
+        </div>
+        <div class="flex justify-end">
+          <input id="keypad0" class="w-33 pa2" type="button" value="0">
+          <input id="keypadR" class="w-33 pa2" type="button" value="R">
+        </div>
+      </div>
+    </div>
+    <div class="flex flex-column items-center">
+      <span id="saleCostLCD" class="w-33 f6 br3 ba ph3 pv2 mb2 black"></span>
+      <span id="saleQuantityLCD" class="w-33 f6 br3 ba ph3 pv2 mb2 black"></span>
+      <div class="flex justify-around">
+        <div class="pa1 flex flex-column">
+          <span id="priceLCD1" class="f6 br3 ba ph3 pv2 mb2 black"></span>
+          <input id="nozzle1up" type="button" value="Up"></input>
+          <input id="nozzle1down" type="button" value="Down"></input>
+        </div>
+        <div class="pa1 flex flex-column">
+          <span id="priceLCD2" class="f6 br3 ba ph3 pv2 mb2 black"></span>
+          <input id="nozzle2up" type="button" value="Up"></input>
+          <input id="nozzle2down" type="button" value="Down"></input>
+        </div>
+        <div class="pa1 flex flex-column">
+          <span id="priceLCD3" class="f6 br3 ba ph3 pv2 mb2 black"></span>
+          <input id="nozzle3up" type="button" value="Up"></input>
+          <input id="nozzle3down" type="button" value="Down"></input>
+        </div>
+      </div>
+    </div>
+  </div>
+</body>
+
+</html>
