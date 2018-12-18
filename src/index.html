@@ -9,8 +9,8 @@
   <link rel="stylesheet" href="https://unpkg.com/tachyons@4.10.0/css/tachyons.min.css" />
 </head>
 
-<body class="w-100 sans-serif bg-white pt5 ph3">
-  <div class="flex">
+<body class="w-50 center sans-serif bg-white pt5 ph3">
+  <div class="flex justify-around">
     <div class="flex flex-column items-center">
       <span id="presetLCD" class="f6 br3 ba ph3 pv2 mb2 black">000</span>
       <div id="keypad" class="flex flex-column ma3">
@@ -57,6 +57,26 @@
       </div>
     </div>
   </div>
+  <div>
+    <h3>Pump</h3>
+    <input id="pulse1" type="button" value="pulse 0.1">
+    <input id="pulse5" type="button" value="pulse 1">
+    <input id="pulse10" type="button" value="pulse 5">
+    <p id="delivery">text</p>
+  </div>
+  <div>
+    <h3>Point of sale</h3>
+    <input id="clearSale" type="button" value="clear sale">
+  </div>
+  <p>Instructions:
+    <ol>
+      <li>(Optional) input a preset value of fuel delivered on the keypad</li>
+      <li>Lift one of the three nozzles, clicking "Up"</li>
+      <li>Start deliverying fuel at the indicated speed</li>
+      <li>When finished deliverying fueld, put the nozzle down</li>
+      <li>Accept the payment and clear the sale</li>
+    </ol>
+  </p>
 </body>
 
 </html>

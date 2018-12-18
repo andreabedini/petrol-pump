@@ -24,28 +24,12 @@ function sButton(elementId: string) {
   return ss;
 }
 
-/* helpers */
-
-function accumulate(
-  sClearAccumulator: Stream<Unit>,
-  sPulses: Stream<number>,
-  calibration: Cell<number>,
-) {
-  const total = new CellLoop<number>();
-  total.loop(
-    sClearAccumulator.map(() => 0)
-      .orElse(
-        sPulses.snapshot(total, (pulses, total) => pulses + total),
-      )
-      .hold(0),
-  );
-  return total.lift(calibration, (total, calibration) => total * calibration);
-}
-
-enum Fuel { One = 1, Two, Three }
-enum Delivery { Off, Fast1, Fast2, Fast3 }
-enum UpDown { Up, Down }
+enum Delivery { Off, Fast1, Fast2, Fast3, Slow1, Slow2, Slow3 }
 enum End { End }
+enum Fuel { One = 1, Two, Three }
+enum Phase { Idle, Filling, Pos }
+enum Speed { Fast, Slow, Stopped }
+enum UpDown { Up, Down }
 
 interface Inputs {
   sNozzle1: Stream<UpDown>;
@@ -69,296 +53,262 @@ interface Outputs {
   priceLCD2: Cell<string>;
   priceLCD3: Cell<string>;
   sSaleComplete: Stream<string>;
+  sBeep: Stream<Unit>;
 }
 
-main();
+class LifeCycle {
+  sStart: Stream<Fuel>;
+  sEnd: Stream<End>;
+  fillActive: CellLoop<Fuel | null>;
 
-function main() {
-  const calibration = new Cell(1.0);
-  const price1 = new Cell(2.149);
-  const price2 = new Cell(2.341);
-  const price3 = new Cell(1.499);
-  const sFuelPulses = new Stream<number>();
-  const sClearSale = new StreamSink<Unit>();
+  constructor(
+    sNozzle1: Stream<UpDown>,
+    sNozzle2: Stream<UpDown>,
+    sNozzle3: Stream<UpDown>
+  ) {
+    this.fillActive = new CellLoop<Fuel | null>();
 
-  /* Nozzles */
-  const sNozzle1 = sButton("nozzle1up")
-    .map(() => UpDown.Up)
-    .orElse(sButton("nozzle1down")
-      .map(() => UpDown.Down));
+    const sLiftNozzle =
+      this.whenLifted(sNozzle1, Fuel.One)
+        .orElse(
+          this.whenLifted(sNozzle2, Fuel.Two)
+        ).orElse(
+          this.whenLifted(sNozzle3, Fuel.Three)
+        );
 
-  const sNozzle2 = sButton("nozzle2up")
-    .map(() => UpDown.Up)
-    .orElse(sButton("nozzle2down")
-      .map(() => UpDown.Down));
+    this.sStart =
+      sLiftNozzle.gate(this.fillActive.map(active => active === null));
 
-  const sNozzle3 = sButton("nozzle3up")
-    .map(() => UpDown.Up)
-    .orElse(sButton("nozzle3down")
-      .map(() => UpDown.Down));
+    this.sEnd =
+      this.whenSetDown(sNozzle1, Fuel.One, this.fillActive)
+        .orElse(
+          this.whenSetDown(sNozzle2, Fuel.Two, this.fillActive)
+        ).orElse(
+          this.whenSetDown(sNozzle3, Fuel.Three, this.fillActive)
+        );
 
-  /* Keypad */
-  const sKeypad =
-    sButton("keypad1").map((e) => "1")
-      .orElse(sButton("keypad2").map((e) => "2"))
-      .orElse(sButton("keypad3").map((e) => "3"))
-      .orElse(sButton("keypad4").map((e) => "4"))
-      .orElse(sButton("keypad5").map((e) => "5"))
-      .orElse(sButton("keypad6").map((e) => "6"))
-      .orElse(sButton("keypad7").map((e) => "7"))
-      .orElse(sButton("keypad8").map((e) => "8"))
-      .orElse(sButton("keypad9").map((e) => "9"))
-      .orElse(sButton("keypad0").map((e) => "0"))
-      .orElse(sButton("keypadR").map((e) => "R"));
-
-  const { presetLCD, saleCostLCD, saleQuantityLCD, priceLCD1, priceLCD2, priceLCD3, sSaleComplete } =
-    Transaction.run(() =>
-      build({ sNozzle1, sNozzle2, sNozzle3, sFuelPulses, calibration, price1, price2, price3, sClearSale, sKeypad })
+    this.fillActive.loop(
+      this.sEnd.map(e => null as Fuel | null)
+        .orElse(this.sStart.map(f => f as Fuel | null))
+        .hold(null)
     );
+  }
 
-  /*
-  * Outputs
-  */
+  whenLifted(
+    sNozzle: Stream<UpDown>,
+    fuel: Fuel
+  ): Stream<Fuel> {
+    return sNozzle.filter(u => u === UpDown.Up).map(() => fuel);
+  }
 
-  sLabel("presetLCD", presetLCD);
-  sLabel("saleQuantityLCD", saleQuantityLCD);
-  sLabel("saleCostLCD", saleCostLCD);
-  sLabel("priceLCD1", priceLCD1);
-  sLabel("priceLCD2", priceLCD2);
-  sLabel("priceLCD3", priceLCD3);
-
-  sSaleComplete.listen(sale => {
-    const result = window.confirm(sale);
-    if (result) {
-      setTimeout(() => sClearSale.send(new Unit()), 0);
-    }
-  });
-
+  whenSetDown(
+    sNozzle: Stream<UpDown>,
+    fuel: Fuel,
+    fillActive: Cell<Fuel | null>
+  ) {
+    return sNozzle
+      .gate(fillActive.map(fuelType => fuelType === fuel))
+      .filter(u => u === UpDown.Down).map(() => fuel)
+      .map(() => End.End);
+  }
 }
 
-function build(inputs: Inputs): Outputs {
-  const sStart = new StreamLoop<Fuel>();
+class Fill {
+  readonly price: Cell<number>;
+  readonly litersDelivered: Cell<number>;
+  readonly dollarsDelivered: Cell<number>;
 
-  const fi =
-    Fill(
-      sStart.map(() => new Unit()),
-      inputs.sFuelPulses,
-      inputs.calibration,
-      inputs.price1,
-      inputs.price2,
-      inputs.price3,
-      sStart);
+  constructor(
+    sClearAccumulator: Stream<Unit>,
+    sFuelPulses: Stream<number>,
+    calibration: Cell<number>,
+    price1: Cell<number>,
+    price2: Cell<number>,
+    price3: Cell<number>,
+    sStart: Stream<Fuel>
+  ) {
+    this.price = this.capturePrice(sStart, price1, price2, price3);
+    this.litersDelivered = this.accumulate(sClearAccumulator, sFuelPulses, calibration);
+    this.dollarsDelivered = this.litersDelivered.lift(this.price, (liters, price) => liters * price);
+  }
 
-  const np = NotifyPointOfSale(
-    LifeCycle(
-      inputs.sNozzle1,
-      inputs.sNozzle2,
-      inputs.sNozzle3),
-    inputs.sClearSale,
-    fi);
+  capturePrice(
+    sStart: Stream<Fuel>,
+    price1: Cell<number>,
+    price2: Cell<number>,
+    price3: Cell<number>
+  ): Cell<number> {
+    const sPrice1 =
+      sStart
+        .snapshot(price1, (f, p) => f === Fuel.One ? p : null)
+        .filterNotNull() as Stream<number>;
 
-  sStart.loop(np.sStart);
+    const sPrice2 =
+      sStart
+        .snapshot(price2, (f, p) => f === Fuel.Two ? p : null)
+        .filterNotNull() as Stream<number>;
 
-  const delivery = np.fillActive.map(fuelType => {
-    switch (fuelType) {
-      case Fuel.One:
-        return Delivery.Fast1;
-      case Fuel.Two:
-        return Delivery.Fast2;
-      case Fuel.Three:
-        return Delivery.Fast3;
-      default:
-        return Delivery.Off;
-    }
-  });
+    const sPrice3 =
+      sStart
+        .snapshot(price3, (f, p) => f === Fuel.Three ? p : null)
+        .filterNotNull() as Stream<number>;
 
-  const saleCostLCD = fi.dollarsDelivered.map(s => s.toString());
-  const saleQuantityLCD = fi.litersDelivered.map(s => s.toString());
-  const priceLCD1 = priceLCD(np.fillActive, fi.price, inputs.price1, Fuel.One);
-  const priceLCD2 = priceLCD(np.fillActive, fi.price, inputs.price2, Fuel.Two);
-  const priceLCD3 = priceLCD(np.fillActive, fi.price, inputs.price3, Fuel.Three);
+    return sPrice1.orElse(sPrice2).orElse(sPrice3).hold(0);
+  }
 
-  const keypad = Keypad(inputs.sKeypad, new Stream<Unit>());
-  const presetLCD = keypad.value.map(n => n.toString());
-
-  return {
-    delivery, presetLCD, saleCostLCD, saleQuantityLCD, priceLCD1, priceLCD2, priceLCD3,
-    sSaleComplete: np.sSaleComplete
-  };
+  accumulate(
+    sClearAccumulator: Stream<Unit>,
+    sPulses: Stream<number>,
+    calibration: Cell<number>,
+  ) {
+    const total = new CellLoop<number>();
+    total.loop(
+      sClearAccumulator.map(() => 0)
+        .orElse(
+          sPulses.snapshot(total, (pulses, total) => pulses + total),
+        )
+        .hold(0),
+    );
+    return total.lift(calibration, (total, calibration) => total * calibration);
+  }
 }
 
-function Keypad(
-  sKeypad: Stream<string>,
-  sClear: Stream<Unit>
-) {
-  const value = new CellLoop<number>();
+class NotifyPointOfSale {
+  readonly sStart: Stream<Fuel>;
+  readonly fillActive: Cell<Fuel | null>;
+  readonly fuelFlowing: Cell<Fuel | null>;
 
-  const sKeyUpdate =
-    sKeypad.snapshot(value, (k, v) => {
-      if (k === "R") { return 0; } else {
-        const x10 = v * 10;
-        return x10 >= 1000 ? null :
-          k === "0" ? x10 :
-            k === "1" ? x10 + 1 :
-              k === "2" ? x10 + 2 :
-                k === "3" ? x10 + 3 :
-                  k === "4" ? x10 + 4 :
-                    k === "5" ? x10 + 5 :
-                      k === "6" ? x10 + 6 :
-                        k === "7" ? x10 + 7 :
-                          k === "8" ? x10 + 8 : x10 + 9;
-      }
-    }).filterNotNull() as Stream<number>;
+  readonly sEnd: Stream<End>;
+  readonly sBeep: Stream<Unit>;
+  readonly sSaleComplete: Stream<string>;
 
-  value.loop(sKeyUpdate.orElse(sClear.map(() => 0)).hold(0));
+  constructor(lc: LifeCycle, sClearSale: Stream<Unit>, fi: Fill) {
+    const phase = new CellLoop<Phase>();
 
-  const sBeep = sKeyUpdate.map(() => new Unit());
+    this.sStart = lc.sStart.gate(phase.map(p => p === Phase.Idle));
+    this.sEnd = lc.sEnd.gate(phase.map(p => p === Phase.Filling));
 
-  return { value, sBeep };
+    this.fillActive =
+      this.sStart
+        .map(f => f as Fuel | null)
+        .orElse(
+          sClearSale.map(() => null as Fuel | null)
+        )
+        .hold(null);
+
+    this.fuelFlowing =
+      this.sStart
+        .map(f => f as Fuel | null)
+        .orElse(
+          this.sEnd.map(() => null as Fuel | null)
+        )
+        .hold(null);
+
+    this.sBeep = sClearSale;
+
+    this.sSaleComplete =
+      this.sEnd.snapshot(
+        this.fuelFlowing.lift4(fi.price, fi.dollarsDelivered, fi.litersDelivered,
+          (f, p, d, l) => {
+            if (f !== null) {
+              return `new Sale: fuel ${f}, price ${p}, dollars: ${d}, liters: ${l}`;
+            } else {
+              return null;
+            }
+          }), (e, sale) => sale)
+        .filterNotNull() as Stream<string>;
+
+    phase.loop(
+      this.sStart.map(() => Phase.Filling)
+        .orElse(this.sEnd.map(() => Phase.Pos))
+        .orElse(sClearSale.map(() => Phase.Idle))
+        .hold(Phase.Idle)
+    );
+  }
 }
 
-function NotifyPointOfSale(
-  lc: { fillActive: CellLoop<Fuel | null>, sStart: Stream<Fuel>, sEnd: Stream<End> },
-  sClearSale: Stream<Unit>,
-  fi: { price: Cell<number>, litersDelivered: Cell<number>, dollarsDelivered: Cell<number> }
-) {
-  enum Phase { Idle, Filling, Pos }
+class Keypad {
+  readonly value: CellLoop<number>;
+  readonly sBeep: Stream<Unit>;
 
-  const phase = new CellLoop<Phase>();
+  constructor(
+    sKeypad: Stream<string>,
+    sClear: Stream<Unit>,
+    active: Cell<boolean> = new Cell(true)
+  ) {
+    this.value = new CellLoop<number>();
 
-  const sStart = lc.sStart.gate(phase.map(p => p === Phase.Idle));
-  const sEnd = lc.sEnd.gate(phase.map(p => p === Phase.Filling));
-
-  const fuelFlowing =
-    sStart
-      .map(f => f as Fuel | null)
-      .orElse(
-        sEnd.map(() => null as Fuel | null)
-      )
-      .hold(null);
-
-  const fillActive =
-    sStart
-      .map(f => f as Fuel | null)
-      .orElse(
-        sClearSale.map(() => null as Fuel | null)
-      )
-      .hold(null);
-
-  const sBeep = sClearSale;
-
-  const sSaleComplete =
-    sEnd.snapshot(
-      fuelFlowing.lift4(fi.price, fi.dollarsDelivered, fi.litersDelivered,
-        (f, p, d, l) => {
-          if (f !== null) {
-            return `new Sale: fuel ${f}, price ${p}, dollars: ${d}, liters: ${l}`;
-          } else {
-            return null;
+    const sKeyUpdate =
+      sKeypad
+        .gate(active)
+        .snapshot(this.value, (k, v) => {
+          if (k === "R") { return 0; } else {
+            const x10 = v * 10;
+            return x10 >= 1000 ? null :
+              k === "0" ? x10 :
+                k === "1" ? x10 + 1 :
+                  k === "2" ? x10 + 2 :
+                    k === "3" ? x10 + 3 :
+                      k === "4" ? x10 + 4 :
+                        k === "5" ? x10 + 5 :
+                          k === "6" ? x10 + 6 :
+                            k === "7" ? x10 + 7 :
+                              k === "8" ? x10 + 8 : x10 + 9;
           }
-        }), (e, sale) => sale)
-      .filterNotNull() as Stream<string>;
+        }).filterNotNull() as Stream<number>;
 
-  phase.loop(
-    sStart.map(() => Phase.Filling)
-      .orElse(sEnd.map(() => Phase.Pos))
-      .orElse(sClearSale.map(() => Phase.Idle))
-      .hold(Phase.Idle)
-  );
-
-  return { sStart, sEnd, fillActive, fuelFlowing, sBeep, sSaleComplete };
+    this.value.loop(sKeyUpdate.orElse(sClear.map(() => 0)).hold(0));
+    this.sBeep = sKeyUpdate.map(() => new Unit());
+  }
 }
 
-function LifeCycle(
-  sNozzle1: Stream<UpDown>,
-  sNozzle2: Stream<UpDown>,
-  sNozzle3: Stream<UpDown>
-) {
-  const fillActive = new CellLoop<Fuel | null>();
+class Preset {
+  readonly delivery: Cell<Delivery>
+  readonly keypadActive: Cell<boolean>
 
-  const sLiftNozzle =
-    whenLifted(sNozzle1, Fuel.One)
-      .orElse(
-        whenLifted(sNozzle2, Fuel.Two)
-      ).orElse(
-        whenLifted(sNozzle3, Fuel.Three)
-      );
+  constructor(
+    presetDollars: Cell<number>,
+    fi: Fill,
+    fuelFlowing: Cell<Fuel | null>
+  ) {
+    const speed = presetDollars.lift4(
+      fi.price, fi.dollarsDelivered, fi.litersDelivered,
+      (presetDollars, price, dollarsDelivered, litersDelivered) => {
+        if (presetDollars === 0) {
+          return Speed.Fast
+        } else {
+          if (dollarsDelivered >= presetDollars)
+            return Speed.Stopped
 
-  const sStart =
-    sLiftNozzle.gate(fillActive.map(active => active === null));
+          const slowDollars = presetDollars - 5
+          if (dollarsDelivered >= slowDollars)
+            return Speed.Slow;
+          else
+            return Speed.Fast;
+        }
+      }
+    )
 
-  const sEnd =
-    whenSetDown(sNozzle1, Fuel.One, fillActive)
-      .orElse(
-        whenSetDown(sNozzle2, Fuel.Two, fillActive)
-      ).orElse(
-        whenSetDown(sNozzle3, Fuel.Three, fillActive)
-      );
+    this.delivery = fuelFlowing.lift(speed,
+      (fuel, speed) =>
+        speed === Speed.Fast ? (
+          fuel === Fuel.One ? Delivery.Fast1 :
+            fuel === Fuel.Two ? Delivery.Fast2 :
+              fuel === Fuel.Three ? Delivery.Fast3 :
+                Delivery.Off
+        ) :
+          speed === Speed.Slow ? (
+            fuel === Fuel.One ? Delivery.Slow1 :
+              fuel === Fuel.Two ? Delivery.Slow2 :
+                fuel === Fuel.Three ? Delivery.Slow3 :
+                  Delivery.Off
+          ) :
+            Delivery.Off
+    )
 
-  fillActive.loop(
-    sEnd.map(e => null as Fuel | null)
-      .orElse(sStart.map(f => f as Fuel | null))
-      .hold(null)
-  );
-
-  return { fillActive, sStart, sEnd };
-}
-
-function whenLifted(
-  sNozzle: Stream<UpDown>,
-  fuel: Fuel
-): Stream<Fuel> {
-  return sNozzle.filter(u => u === UpDown.Up).map(() => fuel);
-}
-
-function whenSetDown(
-  sNozzle: Stream<UpDown>,
-  fuel: Fuel,
-  fillActive: Cell<Fuel | null>
-) {
-  return sNozzle
-    .gate(fillActive.map(fuelType => fuelType === fuel))
-    .filter(u => u === UpDown.Down).map(() => fuel)
-    .map(() => End.End);
-}
-
-function Fill(
-  sClearAccumulator: Stream<Unit>,
-  sFuelPulses: Stream<number>,
-  calibration: Cell<number>,
-  price1: Cell<number>,
-  price2: Cell<number>,
-  price3: Cell<number>,
-  sStart: Stream<Fuel>
-) {
-  const price = capturePrice(sStart, price1, price2, price3);
-  const litersDelivered = accumulate(sClearAccumulator, sFuelPulses, calibration);
-  const dollarsDelivered = litersDelivered.lift(price, (liters, price) => liters * price);
-  return { price, litersDelivered, dollarsDelivered };
-}
-
-function capturePrice(
-  sStart: Stream<Fuel>,
-  price1: Cell<number>,
-  price2: Cell<number>,
-  price3: Cell<number>,
-): Cell<number> {
-  const sPrice1 =
-    sStart
-      .snapshot(price1, (f, p) => f === Fuel.One ? p : null)
-      .filterNotNull() as Stream<number>;
-
-  const sPrice2 =
-    sStart
-      .snapshot(price2, (f, p) => f === Fuel.Two ? p : null)
-      .filterNotNull() as Stream<number>;
-
-  const sPrice3 =
-    sStart
-      .snapshot(price3, (f, p) => f === Fuel.Three ? p : null)
-      .filterNotNull() as Stream<number>;
-
-  return sPrice1.orElse(sPrice2).orElse(sPrice3).hold(0);
+    this.keypadActive = fuelFlowing.lift(speed,
+      (fuel, speed) => fuel === null || speed === Speed.Fast)
+  }
 }
 
 function priceLCD(
@@ -379,3 +329,134 @@ function priceLCD(
     });
   return r;
 }
+
+function build(inputs: Inputs): Outputs {
+  const sStart = new StreamLoop<Fuel>();
+
+  const fi = new Fill(
+    sStart.map(() => new Unit()), inputs.sFuelPulses, inputs.calibration,
+    inputs.price1, inputs.price2, inputs.price3, sStart);
+
+  const np = new NotifyPointOfSale(
+    new LifeCycle(inputs.sNozzle1, inputs.sNozzle2, inputs.sNozzle3),
+    inputs.sClearSale, fi);
+
+  sStart.loop(np.sStart);
+
+  const priceLCD1 = priceLCD(np.fillActive, fi.price, inputs.price1, Fuel.One);
+  const priceLCD2 = priceLCD(np.fillActive, fi.price, inputs.price2, Fuel.Two);
+  const priceLCD3 = priceLCD(np.fillActive, fi.price, inputs.price3, Fuel.Three);
+
+  const keypadActive = new CellLoop<boolean>()
+
+  const ke = new Keypad(
+    inputs.sKeypad,
+    inputs.sClearSale,
+    keypadActive
+  );
+
+  fi.price.listen(console.log)
+
+  const pr = new Preset(
+    ke.value,
+    fi,
+    np.fuelFlowing
+  )
+
+  keypadActive.loop(pr.keypadActive)
+
+  return {
+    delivery: pr.delivery,
+    presetLCD: ke.value.map(s => s.toString()),
+    saleCostLCD: fi.dollarsDelivered.map(s => s.toString()),
+    saleQuantityLCD: fi.litersDelivered.map(s => s.toString()),
+    priceLCD1, priceLCD2, priceLCD3,
+    sSaleComplete: np.sSaleComplete,
+    sBeep: np.sBeep.orElse(ke.sBeep)
+  };
+}
+
+
+function main() {
+  const delivery = new CellLoop<Delivery>()
+
+  const inputs = {
+    calibration: new Cell(1.0),
+    price1: new Cell(2.149),
+    price2: new Cell(2.341),
+    price3: new Cell(1.499),
+
+    sFuelPulses: sButton("pulse1").map(e => 0.1)
+      .orElse(sButton("pulse5").map(e => 1))
+      .orElse(sButton("pulse10").map(e => 5))
+      .gate(delivery.map(d => d !== Delivery.Off)),
+
+    sClearSale: sButton("clearSale"),
+
+    /* Nozzles */
+    sNozzle1: sButton("nozzle1up")
+      .map(() => UpDown.Up)
+      .orElse(sButton("nozzle1down")
+        .map(() => UpDown.Down)),
+
+    sNozzle2: sButton("nozzle2up")
+      .map(() => UpDown.Up)
+      .orElse(sButton("nozzle2down")
+        .map(() => UpDown.Down)),
+
+    sNozzle3: sButton("nozzle3up")
+      .map(() => UpDown.Up)
+      .orElse(sButton("nozzle3down")
+        .map(() => UpDown.Down)),
+
+    sKeypad: sButton("keypad1").map(e => "1")
+      .orElse(sButton("keypad2").map(e => "2"))
+      .orElse(sButton("keypad3").map(e => "3"))
+      .orElse(sButton("keypad4").map(e => "4"))
+      .orElse(sButton("keypad5").map(e => "5"))
+      .orElse(sButton("keypad6").map(e => "6"))
+      .orElse(sButton("keypad7").map(e => "7"))
+      .orElse(sButton("keypad8").map(e => "8"))
+      .orElse(sButton("keypad9").map(e => "9"))
+      .orElse(sButton("keypad0").map(e => "0"))
+      .orElse(sButton("keypadR").map(e => "R"))
+  }
+
+  const outputs = build(inputs);
+
+  const {
+    presetLCD, saleCostLCD, saleQuantityLCD, priceLCD1, priceLCD2, priceLCD3,
+    sSaleComplete
+  } = outputs
+
+  delivery.loop(outputs.delivery)
+
+  /*
+  * Outputs
+  */
+
+  sLabel("presetLCD", presetLCD);
+  sLabel("saleQuantityLCD", saleQuantityLCD);
+  sLabel("saleCostLCD", saleCostLCD);
+  sLabel("priceLCD1", priceLCD1);
+  sLabel("priceLCD2", priceLCD2);
+  sLabel("priceLCD3", priceLCD3);
+
+  sSaleComplete.listen(sale => window.confirm(
+    `${sale}\nClick "clear sale" after accepting payment.`
+  ));
+
+  const deliveryMsg = {
+    [Delivery.Off]: "Off",
+    [Delivery.Fast1]: "Fast1",
+    [Delivery.Fast2]: "Fast2",
+    [Delivery.Fast3]: "Fast3",
+    [Delivery.Slow1]: "Slow1",
+    [Delivery.Slow2]: "Slow2",
+    [Delivery.Slow3]: "Slow3",
+  }
+
+  sLabel("delivery", delivery.map(d => `delivery: ${deliveryMsg[d]}`))
+}
+
+Transaction.run(main)
