@@ -5,5 +5,6 @@ Implemented up to the PoS clearance part.
 
 
 ```
+$ npm install
 $ npm start
 ```
